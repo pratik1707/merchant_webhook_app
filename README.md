@@ -7,7 +7,9 @@ job via Sidekiq.
 ## How it works
 
 1. **`WebhooksController#payments`** receives the webhook POST, validates `event_id` and
-   `event_type` are present, and inserts a `PaymentEvent` row.
+   `event_type` are present, and inserts a `PaymentEvent` row. Only an explicit whitelist of
+   payload fields (`PERMITTED_PAYLOAD_FIELDS`) is persisted - anything else in the request
+   body is dropped rather than stored as-is.
 2. **Idempotency** is enforced at the database level: `event_id` has a unique index on
    `payment_events`, so a duplicate webhook delivery (providers commonly retry on timeout)
    fails to insert a second row instead of silently double-processing.
@@ -16,8 +18,10 @@ job via Sidekiq.
    a non-2xx here would just cause the provider to retry again.
 4. On success, **`ProcessPaymentEventJob`** is enqueued via Sidekiq to do the actual work
    (mark an order paid/failed, trigger fulfillment, etc.), keeping the webhook response fast.
-5. The job has its own idempotency guard (`return if event.status == "processed"`) to cover
-   duplicate job enqueues, plus automatic retry with backoff for transient failures.
+5. The job's own idempotency guard is atomic: it wraps the check-and-update in
+   `event.with_lock { ... }`, taking a row-level database lock so two workers can never both
+   pass the "already processed?" check for the same event. It also has automatic retry with
+   backoff for transient failures.
 
 ## Requirements
 
@@ -40,10 +44,20 @@ rails server
 bundle exec sidekiq
 ```
 
+## Testing
+
+```bash
+bin/rails test                          # controller/job/model/integration suite
+bin/rails runner script/concurrency_test.rb   # proves the unique index holds under 20 concurrent threads
+```
+
 ## Known limitations / next steps
 
-- The job's idempotency guard (`return if processed?`) is not atomic under true concurrency -
-  see comments in `ProcessPaymentEventJob` for the `with_lock` / conditional-update fix if
-  stricter guarantees are needed.
-- `payload: params.to_unsafe_h` stores the raw webhook body; consider validating/whitelisting
-  fields before persisting in production.
+- The `failed` status on `PaymentEvent` is defined but never actually set - an unrecognized
+  `event_type`, or a job that exhausts all retries, currently just logs and leaves the record
+  at `received` indefinitely, with no path to `failed` and no alerting.
+- No webhook signature verification yet. The endpoint currently trusts any request that hits
+  it; a production version needs to verify the provider's signature (e.g. an HMAC header)
+  before treating the payload as genuine.
+- No index on `status` or `event_type` yet - fine at current volume, but worth adding if you
+  ever need to query "events stuck in `received`" for monitoring.
