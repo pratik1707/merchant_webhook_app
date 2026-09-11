@@ -1,0 +1,21 @@
+default: &default
+  adapter: postgresql
+  encoding: unicode
+  pool: <%= ENV.fetch("RAILS_MAX_THREADS") { 25 } %>
+  username: pmalang
+  password: password
+  host: localhost
+
+development:
+  <<: *default
+  database: merchant_webhook_app_development
+
+test:
+  <<: *default
+  database: merchant_webhook_app_test
+
+production:
+  <<: *default
+  database: merchant_webhook_app_production
+  username: merchant_webhook_app
+  password: <%= ENV["MERCHANT_WEBHOOK_APP_DATABASE_PASSWORD"] %>

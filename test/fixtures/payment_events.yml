@@ -1,0 +1,15 @@
+# Read about fixtures at https://api.rubyonrails.org/classes/ActiveRecord/FixtureSet.html
+
+succeeded_event:
+  event_id: evt_test_success_001
+  event_type: payment.succeeded
+  status: processed
+  payload: {}
+  processed_at: <%= Time.current %>
+
+pending_event:
+  event_id: evt_test_pending_001
+  event_type: payment.succeeded
+  status: received
+  payload: {}
+  processed_at:
