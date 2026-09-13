@@ -50,6 +50,6 @@ group :development, :test do
 end
 
 gem "paper_trail", "~> 17.0"
-gem "json", "~> 2.9"
+gem "json", "~> 3.0"
 
 gem "sidekiq", "~> 8.1"
