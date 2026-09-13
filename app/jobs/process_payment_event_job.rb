@@ -2,26 +2,42 @@ class ProcessPaymentEventJob < ApplicationJob
   queue_as :default
   retry_on StandardError, wait: :polynomially_longer, attempts: 5
 
+  OUTCOME_BY_EVENT_TYPE = {
+    "payment.succeeded" => "succeeded",
+    "payment.failed"    => "failed"
+  }.freeze
+
   def perform(payment_event_id)
     event = PaymentEvent.find(payment_event_id)
 
-    # Row lock makes the check-and-update atomic, closing the race window
-    # where two workers both see "received" before either writes "processed".
-    event.with_lock do
-      return if event.processed?
-
-      handle(event)
-      event.update!(status: :processed, processed_at: Time.current)
+    claimed = event.with_lock do
+      if event.status == "received"
+        event.update!(status: "processing")
+        true
+      else
+        false
+      end
     end
-  end
+    return unless claimed
 
-  private
-
-  def handle(event)
-    case event.event_type
-    when "payment.succeeded" then Rails.logger.info("[job] paid event=#{event.event_id}")
-    when "payment.failed"    then Rails.logger.info("[job] failed event=#{event.event_id}")
-    else                          Rails.logger.warn("[job] unknown event_type=#{event.event_type} event=#{event.event_id}")
+    outcome = OUTCOME_BY_EVENT_TYPE[event.event_type]
+    if outcome.nil?
+      Rails.logger.info("[process] event=#{event.id} type=#{event.event_type} not actionable")
+      return event.update!(status: "ignored")
     end
+
+    reference = event.payload["provider_reference_id"]
+    txn = Transaction.find_by(provider_reference_id: reference)
+
+    if txn.nil?
+      Rails.logger.error("[process] event=#{event.id} orphaned reference=#{reference.inspect}")
+      return event.update!(status: "orphaned")
+    end
+
+    event.update!(transaction_id: txn.id)
+
+    ResolveTransaction.call(txn: txn, outcome: outcome, source: :webhook)
+
+    event.update!(status: "processed", processed_at: Time.current)
   end
 end

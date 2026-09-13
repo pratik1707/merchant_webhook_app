@@ -3,7 +3,7 @@ class WebhooksController < ApplicationController
 
   # Fields we trust enough to persist from the raw webhook body.
   # Adjust this list to match your actual payment provider's payload schema.
-  PERMITTED_PAYLOAD_FIELDS = %i[amount currency merchant_id transaction_id status].freeze
+  PERMITTED_PAYLOAD_FIELDS = %w[provider_reference_id amount_cents currency].freeze
 
   def payments
     return render json: { error: "event_id and event_type are required" }, status: :bad_request if params[:event_id].blank? || params[:event_type].blank?

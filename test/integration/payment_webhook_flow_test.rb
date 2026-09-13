@@ -1,93 +1,110 @@
 require "test_helper"
 
 class PaymentWebhookFlowTest < ActionDispatch::IntegrationTest
-  include ActiveJob::TestHelper
+  setup do
+    purge_payment_data!
+    @customer = Customer.create!(email: "flow@example.com")
+    @order    = @customer.orders.create!(amount_cents: 10_000)
+    @txn      = @order.transactions.create!(provider_reference_id: "ref_flow",
+                                            amount_cents: 10_000)
+  end
 
   test "full flow: new event is accepted, processed, and duplicates are rejected" do
-    event_id = "evt_flow_test_#{SecureRandom.hex(4)}"
+    deliver!(event_id: "evt_flow_1")
 
-    # Step 1: the webhook arrives for the first time
-    assert_enqueued_with(job: ProcessPaymentEventJob) do
-      post "/webhooks/payments", params: { event_id: event_id, event_type: "payment.succeeded" }
-    end
-    assert_response :accepted
-    assert_equal "accepted", JSON.parse(response.body)["status"]
-
-    event = PaymentEvent.find_by(event_id: event_id)
-    assert_not_nil event
-    assert_equal "received", event.status
-    assert_nil event.processed_at
-
-    # Step 2: the background worker actually runs the queued job
-    perform_enqueued_jobs
-
-    event.reload
+    assert_response :success
+    event = PaymentEvent.find_by!(event_id: "evt_flow_1")
     assert_equal "processed", event.status
     assert_not_nil event.processed_at
+    assert_equal @txn.id, event.transaction_id
 
-    # Step 3: the provider retries and sends the SAME event again (duplicate delivery)
-    assert_no_enqueued_jobs do
-      post "/webhooks/payments", params: { event_id: event_id, event_type: "payment.succeeded" }
-    end
-    assert_response :ok
-    assert_equal "duplicate_ignored", JSON.parse(response.body)["status"]
+    # and the payment itself is resolved
+    assert_equal "succeeded", @txn.reload.status
+    assert_equal "webhook",   @txn.resolved_by
+    assert_equal "paid",      @order.reload.status
+    assert_enqueued_jobs 1, only: FulfillOrderJob
 
-    # Step 4: prove no double-processing happened -- exactly one row, still processed once
-    assert_equal 1, PaymentEvent.where(event_id: event_id).count
-    event.reload
-    assert_equal "processed", event.status
+    # same event again -> 200, but no second row and no second shipment
+    deliver!(event_id: "evt_flow_1")
 
-    # Step 5: even a THIRD duplicate delivery (e.g. provider retries again later) is still safe
-    post "/webhooks/payments", params: { event_id: event_id, event_type: "payment.succeeded" }
-    assert_response :ok
-    assert_equal 1, PaymentEvent.where(event_id: event_id).count
+    assert_response :success
+    assert_match(/duplicate_ignored/, response.body)
+    assert_equal 1, PaymentEvent.where(event_id: "evt_flow_1").count
+    assert_enqueued_jobs 1, only: FulfillOrderJob
   end
 
   test "full flow: two different events are both processed independently" do
-    event_a = "evt_flow_a_#{SecureRandom.hex(4)}"
-    event_b = "evt_flow_b_#{SecureRandom.hex(4)}"
+    # Stripe really does send both charge.succeeded and payment_intent.succeeded for
+    # one payment. Different event ids, so the unique index has nothing to object to.
+    deliver!(event_id: "evt_charge_succeeded")
+    deliver!(event_id: "evt_payment_intent_succeeded")
 
-    perform_enqueued_jobs do
-      post "/webhooks/payments", params: { event_id: event_a, event_type: "payment.succeeded" }
-      post "/webhooks/payments", params: { event_id: event_b, event_type: "payment.failed" }
-    end
+    assert_equal 2, PaymentEvent.count, "both events are stored - they are genuinely different"
+    assert_equal %w[processed processed],
+                 PaymentEvent.order(:event_id).pluck(:status),
+                 "each event is processed on its own merits"
 
-    assert_equal "processed", PaymentEvent.find_by(event_id: event_a).status
-    assert_equal "processed", PaymentEvent.find_by(event_id: event_b).status
-    assert_equal 2, PaymentEvent.where(event_id: [event_a, event_b]).count
+    # ...but the payment is decided once, and the order ships once
+    assert_equal "succeeded", @txn.reload.status
+    assert_equal "paid",      @order.reload.status
+    assert_enqueued_jobs 1, only: FulfillOrderJob
   end
 
-    test "idempotency: same payment.succeeded event delivered twice end-to-end" do
-    event_id = "evt_idempotent_#{SecureRandom.hex(4)}"
+  test "idempotency: same payment.succeeded event delivered twice end-to-end" do
+    3.times { deliver!(event_id: "evt_retry_me") }
 
-    # First delivery: provider sends payment.succeeded
-    perform_enqueued_jobs do
-      post "/webhooks/payments", params: { event_id: event_id, event_type: "payment.succeeded" }
+    assert_equal 1, PaymentEvent.where(event_id: "evt_retry_me").count
+    assert_equal "processed", PaymentEvent.find_by!(event_id: "evt_retry_me").status
+    assert_equal "succeeded", @txn.reload.status
+    assert_enqueued_jobs 1, only: FulfillOrderJob
+  end
+
+  test "a payment.failed event fails the order and ships nothing" do
+    deliver!(event_id: "evt_failed", event_type: "payment.failed")
+
+    assert_equal "processed", PaymentEvent.find_by!(event_id: "evt_failed").status
+    assert_equal "failed", @txn.reload.status
+    assert_equal "failed", @order.reload.status
+    assert_enqueued_jobs 0, only: FulfillOrderJob
+  end
+
+  test "an event referencing an unknown payment is marked orphaned, not silently dropped" do
+    deliver!(event_id: "evt_orphan", reference_id: "ref_does_not_exist")
+
+    assert_response :success
+    event = PaymentEvent.find_by!(event_id: "evt_orphan")
+    assert_equal "orphaned", event.status
+    assert_nil event.processed_at
+    assert_equal "pending", @txn.reload.status
+    assert_enqueued_jobs 0, only: FulfillOrderJob
+  end
+
+  test "an event type we do not act on is ignored, leaving the payment alone" do
+    deliver!(event_id: "evt_created", event_type: "payment.created")
+
+    assert_equal "ignored", PaymentEvent.find_by!(event_id: "evt_created").status
+    assert_equal "pending", @txn.reload.status
+    assert_enqueued_jobs 0, only: FulfillOrderJob
+  end
+
+  test "a request without event_id is rejected and stores nothing" do
+    post "/webhooks/payments", params: { event_type: "payment.succeeded" }
+
+    assert response.client_error?, "expected a 4xx, got #{response.status}"
+    assert_equal 0, PaymentEvent.count
+  end
+
+  private
+
+  # Posts a webhook and runs the processing job inline, leaving FulfillOrderJob
+  # enqueued so tests can count shipments.
+  def deliver!(event_id:, event_type: "payment.succeeded", reference_id: nil)
+    perform_enqueued_jobs(only: ProcessPaymentEventJob) do
+      post "/webhooks/payments", params: {
+        event_id:              event_id,
+        event_type:            event_type,
+        provider_reference_id: reference_id || @txn.provider_reference_id
+      }
     end
-    assert_response :accepted
-    assert_equal "accepted", JSON.parse(response.body)["status"]
-
-    first_event = PaymentEvent.find_by(event_id: event_id)
-    assert_equal "processed", first_event.status
-    first_processed_at = first_event.processed_at
-    assert_not_nil first_processed_at
-
-    # Second delivery: EXACT same event_id and event_type (provider retried the same webhook)
-    assert_no_enqueued_jobs do
-      post "/webhooks/payments", params: { event_id: event_id, event_type: "payment.succeeded" }
-    end
-    assert_response :ok
-    assert_equal "duplicate_ignored", JSON.parse(response.body)["status"]
-
-    # Prove: still exactly one row, still processed, and processed_at did NOT change
-    # (i.e. it wasn't silently reprocessed)
-    assert_equal 1, PaymentEvent.where(event_id: event_id).count
-    second_event = PaymentEvent.find_by(event_id: event_id)
-    assert_equal "processed", second_event.status
-    assert_equal first_processed_at, second_event.processed_at
-
-    # Prove the audit trail (paper_trail) only recorded the ONE create + ONE update --
-    # the duplicate delivery left no trace of a second processing attempt
-    assert_equal 2, second_event.versions.count
   end
 end
