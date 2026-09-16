@@ -40,7 +40,7 @@ Same destination, two routes. `resolved_by` records which one got there.
 | `Customer`, `Order` | What the customer is buying. `pending` to `paid` or `failed`. |
 | `Transaction` | One attempt to collect payment. `pending` to `succeeded` or `failed`. Holds `provider_reference_id`, `resolved_by`, `resolved_at`. |
 | `PaymentEvent` | The raw webhook record. Unique on `event_id`, linked to the Transaction it resolved. |
-| `ProviderCharge` | Stands in for the provider's own ledger. In production this lives at Stripe or Adyen. |
+| `ProviderCharge` | Stands in for the provider's own ledger. |
 
 `provider_reference_id` is an id this app generates and hands to the provider, which the provider
 echoes back in every webhook so its replies match exactly one row.
@@ -98,9 +98,7 @@ transaction, and `FulfillOrderJob` is enqueued only after commit, since a job en
 transaction survives a rollback.
 
 The unique index doesn't cover this. It makes event **ingestion** idempotent, not payment
-**resolution**. One payment legitimately produces several events; Stripe sends both
-`charge.succeeded` and `payment_intent.succeeded`, each with its own `event_id`, so both are stored
-correctly and both would otherwise fulfil the order.
+**resolution**. One payment legitimately produces several events;
 
 Reconciliation heals `pending` to a terminal state automatically. But if it finds a payment already
 settled, the status is left alone: fulfilment may already have run, and unwinding it is a refund,
@@ -164,5 +162,3 @@ resolved by:   {"reconciliation"=>26, "webhook"=>74}
   disagrees with a recorded outcome is treated the same as one that agrees. Acting on it means a
   refund or clawback, and a decision about goods already shipped.
 - **Reconciliation polls per transaction.** At volume, the provider's bulk events endpoint
-  (Stripe's Events API, Plaid's sync cursor) is cheaper and lets recovered events use the same
-  ingestion path as live ones.

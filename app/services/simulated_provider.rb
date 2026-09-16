@@ -1,5 +1,4 @@
-# Stands in for Stripe/Adyen. Two jobs: keep its own ledger (the independent source
-# of truth reconciliation checks against), and be able to drop webhooks on purpose.
+
 class SimulatedProvider
   EVENT_TYPE = { "succeeded" => "payment.succeeded", "failed" => "payment.failed" }.freeze
 

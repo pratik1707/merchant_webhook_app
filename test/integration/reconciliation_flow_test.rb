@@ -68,4 +68,33 @@ class ReconciliationFlowTest < ActionDispatch::IntegrationTest
     assert_equal "ignored", PaymentEvent.find_by(event_id: "evt_created").status
     assert_equal "pending", txn.reload.status
   end
+
+  # Reconciliation has no way to know a webhook was actually LOST versus just
+  # running behind schedule - it only knows the transaction is stale. So a webhook
+  # that shows up after reconciliation already resolved the same transaction is not
+  # an edge case, it's the expected case whenever the provider is slow rather than
+  # silent. It has to be a no-op for the same reason two webhook events do: only one
+  # writer may ever flip a transaction out of "pending".
+  test "a webhook that arrives after reconciliation already resolved the same transaction is a no-op" do
+    txn = initiate_payment!(customer: @customer, drop_webhook: true)
+    age!(txn, by: ReconcileStaleTransactionsJob::STALE_AFTER + 1.minute)
+
+    stats = ReconcileStaleTransactionsJob.new.perform
+    assert_equal 1, stats[:resolved]
+
+    assert_equal "succeeded",      txn.reload.status
+    assert_equal "reconciliation", txn.resolved_by
+    assert_equal "paid",           txn.order.reload.status
+    assert_enqueued_jobs 1, only: FulfillOrderJob
+
+    # The provider's webhook was never actually dropped - it was just slow. It shows
+    # up now, for a transaction that isn't "pending" anymore.
+    deliver_webhook!(event_id: "evt_late_arrival", event_type: "payment.succeeded",
+                     reference_id: txn.provider_reference_id)
+
+    assert_equal "processed", PaymentEvent.find_by(event_id: "evt_late_arrival").status
+    assert_equal "reconciliation", txn.reload.resolved_by
+    assert_equal "succeeded",      txn.status
+    assert_enqueued_jobs 1, only: FulfillOrderJob
+  end
 end

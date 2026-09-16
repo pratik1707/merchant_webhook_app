@@ -1,5 +1,4 @@
-# Represents the PROVIDER's ledger, not ours. In production this data lives at
-# Stripe/Adyen; here it's local so reconciliation has a real source of truth to check.
+
 class CreateProviderCharges < ActiveRecord::Migration[8.1]
   def change
     create_table :provider_charges do |t|

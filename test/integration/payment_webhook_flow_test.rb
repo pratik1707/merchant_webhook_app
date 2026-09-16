@@ -34,8 +34,7 @@ class PaymentWebhookFlowTest < ActionDispatch::IntegrationTest
   end
 
   test "full flow: two different events are both processed independently" do
-    # Stripe really does send both charge.succeeded and payment_intent.succeeded for
-    # one payment. Different event ids, so the unique index has nothing to object to.
+
     deliver!(event_id: "evt_charge_succeeded")
     deliver!(event_id: "evt_payment_intent_succeeded")
 
