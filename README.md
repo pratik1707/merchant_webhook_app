@@ -3,13 +3,14 @@
 A small Rails service that receives payment webhooks, processes them idempotently, and reconciles
 against the payment provider to recover payments whose webhook never arrived.
 
-Three failure modes, three guards:
+Three failure modes, three guards check:
 
 | Failure | Guard |
 | --- | --- |
 | The same event delivered twice | Unique index on `payment_events.event_id` |
 | One payment resolved by two paths | Conditional `UPDATE ... WHERE status = 'pending'` |
 | No event delivered at all | `ReconcileStaleTransactionsJob` |
+
 
 ## Flow
 
