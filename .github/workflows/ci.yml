@@ -12,3 +12,28 @@ jobs:
         with:
           bundler-cache: true 
       - run: bin/rubocop
+
+  test:
+    runs-on: ubuntu-latest
+    env:
+      RAILS_ENV: test
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/merchant_webhook_app_test
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1 
+        with:
+          bundler-cache: true 
+      - run: bin/rails db:test:prepare
+      - run: bin/rails test 
